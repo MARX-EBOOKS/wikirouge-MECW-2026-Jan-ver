@@ -15,7 +15,7 @@ try { cheerio = require('cheerio'); } catch (e) { console.log('Tip: cheerio not 
 class ConfigLoader {
   constructor() {
     const args = {
-      input: '.', output: 'dist', baseUrl: '', logo: '/favicon.ico', logoText: 'MLCLASSIC',
+      input: '.', output: 'dist', baseUrl: '', logo: '', logoText: 'MLCLASSIC',
       concurrency: 4, config: './libmap.js', only: [], skip: [],
       copyOnly: ['en/archive/', 'en/history/', 'docs/VIL/', 'docs/MEW/', 'ru/VIL-UAIO/'],
       template: './template.js', mitt: '', mps:''
@@ -862,7 +862,7 @@ class BuildEngine {
     }
     await Promise.all(executing);
     process.stdout.write(`\rProgress: rendered ${rendered} | copied ${copied}   \n`);
-    await fs.writeFile(path.join(DIST, 'index.html'), renderer.generateCardIndex(rawConfig));
+    //await fs.writeFile(path.join(DIST, 'index.html'), renderer.generateCardIndex(rawConfig));
 
     console.log(`\nDone: ${rendered} pages rendered | ${copied} assets copied | vol indexes ${volIndexCount} | ${((Date.now() - start) / 1000).toFixed(1)}s`);
   }
