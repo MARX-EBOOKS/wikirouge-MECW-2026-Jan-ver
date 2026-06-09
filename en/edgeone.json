@@ -6,8 +6,8 @@
         "statusCode": 302
       },
       {
-        "source": "/en",
-        "destination": "https://en.491007.xyz",
+        "source": "/ru",
+        "destination": "https://ru.491007.xyz",
         "statusCode": 302
       },
       {
@@ -39,6 +39,12 @@
         "source": "/docs/*",
         "destination": "https://ml.491007.xyz/:splat",
         "statusCode": 302
+      }
+    ],
+    "rewrites": [
+      {
+        "source": "/:splat",
+        "destination": "/"
       }
     ]
 }

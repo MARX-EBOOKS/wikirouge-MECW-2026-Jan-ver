@@ -1,7 +1,7 @@
 (function () {
   'use strict';
 
-  /* reader-nav.js — SPA sidebar navigation
+  /* reader-nav.js - SPA sidebar navigation
    *  Works with: reader-ui.js, reader-pagebar.js
    *  Link scheme: ?doc=<path>#<hash> */
 
@@ -76,10 +76,10 @@
   /* 合集查找 */
   const findCollection = path => {
     const norm = PathUtils.normalizePath(path);
-    return (window.LIBRARY_CONFIG || []).find(c => PathUtils.startsWithPath(norm, c?.basePath || c?.basepath || `/${c?.id || ''}/`)) || null;
+    return (window.LIBRARY_CONFIG || []).find(c => PathUtils.startsWithPath(norm, c?.path || '')) || null;
   };
 
-  /* 路径处理 (SPA 专用：保留完整 PathUtils) */
+  /* 路径处理 (SPA 专用，统一收口到 PathUtils) */
   const PathUtils = {
     specRe: /^(?:mailto|tel|javascript|data|blob):/i,
     httpRe: /^https?:$/i,
@@ -94,92 +94,144 @@
     },
     safeDecode(v) { try { return decodeURIComponent(v); } catch { return v; } },
     resolveUrl(h) { try { return new URL(h, location.href).href; } catch { return location.pathname.replace(/[^/]*$/, '') + h; } },
-
-    docBaseUrl(base = '') {
-      const c = this.normalizePath(base);
-      return new URL('/' + (c ? c.replace(/\/?$/, '/') : ''), location.origin);
+    splitHash(v) {
+      const raw = String(v || '');
+      const i = raw.indexOf('#');
+      return i >= 0 ? { path: raw.slice(0, i), hash: raw.slice(i + 1) } : { path: raw, hash: '' };
     },
-    docPathFromUrl(url) {
-      const rp = this.normalizePath(location.pathname), p = this.safeDecode(url.pathname);
-      if (this.samePath(p, rp) && url.searchParams.has('doc')) return url.searchParams.get('doc') || '';
-      return p + url.search;
-    },
-    resolveDocHref(href, base = '') {
-      const raw = String(href || '').trim();
-      if (!raw) return null;
-      if (raw.startsWith('#')) return { type: 'anchor', href: raw, hash: raw.slice(1) };
-      if (this.specRe.test(raw)) return { type: 'external', href: raw };
-      let url;
-      try {
-        url = new URL(raw, raw.startsWith('?') ? location.href : this.docBaseUrl(base));
-      } catch {
-        return { type: 'external', href: raw };
-      }
-      if (!this.httpRe.test(url.protocol) || url.origin !== location.origin) return { type: 'external', href: url.href };
-      const dp = this.docPathFromUrl(url);
-      if (!dp) return { type: 'external', href: url.href };
-      const hash = url.hash.slice(1);
-      return { type: 'doc', href: this.makeHref(dp, hash), docPath: dp, hash };
-    },
-    makeHref(dp, hash = '') {
-      const raw = String(dp || ''), i = raw.indexOf('#');
-      const path = i >= 0 ? raw.slice(0, i) : raw;
-      const h = hash || (i >= 0 ? raw.slice(i + 1) : '');
-      return location.pathname + '?doc=' + path + (h ? '#' + h : '');
-    },
-    resolveCssHref(href, base) {
-      if (!href) return '';
-      if (/^(https?:|\/\/)/i.test(href)) return href;
-      try {
-        const dir = String(base || '').replace(/\/?$/, '/'), bu = dir.startsWith('/') ? new URL(dir, location.origin) : new URL(dir, location.href), u = new URL(href, bu)
-        return u.pathname + u.search + u.hash
-      }
-      catch { return [String(base || '').replace(/^\/+|\/+$/g, ''), href.replace(/^\.+\//, '')].filter(Boolean).join('/'); }
-    },
-    lowerPathFallback(v) {
-      const raw = String(v || ''); if (!raw) return raw;
-      if (/^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith('/')) {
-        try {
-          const u = new URL(raw, location.href)
-          if (u.origin === location.origin) {
-            const n = new URL(u.href)
-            n.pathname = n.pathname.toLowerCase()
-            return /^[a-z][a-z0-9+.-]*:/i.test(raw) ? n.href : n.pathname + n.search + n.hash
-          }
-        }
-        catch {
-        }
-        return raw;
-      }
-      const qi = raw.indexOf('?'), hi = raw.indexOf('#'), sp = [qi, hi].filter(i => i >= 0).sort((a, b) => a - b)[0];
-      return sp >= 0 ? raw.slice(0, sp).toLowerCase() + raw.slice(sp) : raw.toLowerCase();
+    isSpecial(raw) { return this.specRe.test(String(raw || '')) || /^[a-z][a-z0-9+.-]*:/i.test(String(raw || '')); },
+    rootPath(path) {
+      const raw = String(path || '').trim();
+      if (!raw || raw.startsWith('/') || raw.startsWith('?') || this.isSpecial(raw)) return raw;
+      return '/' + raw.replace(/^\.?\//, '');
     }
   };
 
-  // 常用别名
+  // 常用别名 (解构自 PathUtils)
   const normPath = v => PathUtils.normalizePath(v);
   const normDoc = v => PathUtils.normalizeDoc(v);
   const sameDoc = (a, b) => PathUtils.sameDoc(a, b);
-  const makeHref = (dp, h) => PathUtils.makeHref(dp, h);
-  const resolveDocHref = (h, b) => PathUtils.resolveDocHref(h, b);
+  const makeHref = (dp, h) => PathResolver.makeSpa(dp, h);
+  const resolveDocHref = (h, b) => PathResolver.resolve(b || '', h);
 
+  const PathResolver = {
+    special: /^(?:mailto|tel|javascript|data|blob):/i,
+
+    split(v) {
+      const raw = String(v || '').trim();
+      const h = raw.indexOf('#');
+      if (h >= 0) {
+        return { path: raw.slice(0, h), hash: raw.slice(h + 1) };
+      }
+      return { path: raw, hash: '' };
+    },
+
+    doc(v) {
+      const parts = this.split(v);
+      let raw = parts.path.replace(/^https?:\/\/[^/]+/i, '');
+      const q = raw.indexOf('?');
+      const query = q >= 0 ? raw.slice(q + 1) : '';
+      const doc = query ? new URLSearchParams(query).get('doc') : '';
+      const result = (doc || raw) + (parts.hash ? '#' + parts.hash : '');
+      return result;
+    },
+
+    dir(base) {
+      const p = this.split(this.doc(base)).path.replace(/[?#].*$/, '');
+      if (!p || p.endsWith('/')) {
+        return p;
+      }
+      return p.slice(0, p.lastIndexOf('/') + 1);
+    },
+
+    path(base, href) {
+      const parts = this.split(this.doc(href));
+      const raw = parts.path;
+      if (!raw || raw.startsWith('/') || raw.startsWith('?')) {
+        return raw + (parts.hash ? '#' + parts.hash : '');
+      }
+      let domain = (base && /^(?:[\S]+?:)?\/\//i.test(base) && !base.startsWith(location.origin)) ? base.replace(/^((?:[\S]+?:)?\/\/[^/?#]+).*/, '$1') : '';
+      let dir = this.dir(base);
+      let rel = raw.replace(/^\.\//, '');
+      for (; rel.startsWith('../'); rel = rel.slice(3)) {
+        dir = dir.replace(/\/?[^/]+\/?$/, '/');
+      }
+      domain = (domain && !dir.startsWith('/')) ? domain + '/' : domain;
+      const result = domain + (dir.replace(/\/?$/, '/') + rel).replace(/\/+/g, '/').replace(/^([^/])/, '/$1');
+      return result + (parts.hash ? '#' + parts.hash : '');
+    },
+
+    makeSpa(path, hash = '') {
+      const p = this.split(this.doc(path));
+      const h = hash || p.hash;
+      const spaPath = location.pathname + '?doc=' + this.path('', p.path) + (h ? '#' + h : '');
+      return spaPath;
+    },
+
+    resolve(base, href) {
+      const raw = String(href || '').trim();
+      if (!raw) return null;
+      if (raw.startsWith('#')) {
+        return { type: 'anchor', href: raw, hash: raw.slice(1) };
+      }
+      if (this.special.test(raw) || (/^(?:https?:)?\/\//i.test(raw) && !raw.startsWith(location.origin))) {
+        return { type: 'external', href: raw };
+      }
+      const p = this.path(this.doc(base), raw);
+      const h = this.split(p).hash;
+      return {
+        type: 'doc',
+        href: this.makeSpa(p),
+        docPath: this.split(p).path,
+        hash: h,
+      };
+    },
+
+    resolveResource(base, href) {
+      const raw = String(href || '').trim();
+      if (!raw || this.special.test(raw) || (/^(?:https?:)?\/\//i.test(raw) && !raw.startsWith(location.origin))) {
+        return raw;
+      }
+      return this.path(base, raw);
+    },
+  };
   /* 带大小写回退的 fetch */
   async function fetchWithLowerFallback(path, opts) {
-    const lower = PathUtils.lowerPathFallback(path);
-    try {
-      const res = await fetch(path, opts);
-      if (res.ok || !lower || lower === path) return { res, path, url: path };
+    const rawPath = String(path || '').trim();
+    const external = PathResolver.special.test(rawPath) || (/^(?:https?:)?\/\//i.test(rawPath) && !rawPath.startsWith(location.origin));
+    const finalPath = external ? PathResolver.split(rawPath).path : (PathResolver.split(PathResolver.path('', PathResolver.doc(rawPath))).path || '/');
+    const lower = (() => {
+      if (!finalPath || finalPath.startsWith('?')) return finalPath;
       try {
-        const fb = await fetch(lower, opts)
-        if (fb.ok) return { res: fb, path: lower, url: lower }
+        const u = new URL(finalPath, location.href);
+        if (u.origin !== location.origin) return finalPath;
+        u.pathname = u.pathname.toLowerCase();
+        return /^[a-z][a-z0-9+.-]*:/i.test(finalPath) ? u.href : u.pathname + u.search;
+      } catch {
+        const q = finalPath.indexOf('?');
+        return q >= 0 ? finalPath.slice(0, q).toLowerCase() + finalPath.slice(q) : finalPath.toLowerCase();
       }
-      catch {
+    })();
+    const paths = [finalPath, lower].filter((v, i, arr) => v && arr.indexOf(v) === i);
+    const tryFetch = async (i, firstErr = null, firstResult = null) => {
+      const p = paths[i];
+      if (!p) {
+        if (firstResult) return firstResult;
+        throw firstErr;
       }
-      return { res, path, url: path };
-    } catch (err) {
-      if (!lower || lower === path) throw err;
-      try { return { res: await fetch(lower, opts), path: lower, url: lower }; } catch { throw err; }
-    }
+      try {
+        const res = await fetch(p, opts);
+        const result = { res, path: p, url: res.url || p };
+        return (res.ok || i === paths.length - 1) ? result : tryFetch(i + 1, firstErr, result);
+      } catch (err) {
+        if (i === paths.length - 1) {
+          if (firstResult) return firstResult;
+          throw (firstErr || err);
+        }
+        return tryFetch(i + 1, firstErr || err, firstResult);
+      }
+    };
+    return tryFetch(0);
   }
 
   /* 卷册数据获取 (SPA 版：index.json + index.js 双回退) */
@@ -191,13 +243,13 @@
 
     const load = async d => {
       try {
-        const r = await fetch(new URL(d + '/index.json', location.href).href)
+        const r = await fetch(new URL('/' + d + '/index.json', location.origin).href)
         if (r.ok) return await r.json()
       }
       catch {
       }
       try {
-        const r = await fetch(new URL(d + '/index.js', location.href).href);
+        const r = await fetch(new URL('/' + d + '/index.js', location.origin).href);
         if (!r.ok || /text\/html/i.test(r.headers.get('content-type') || '')) return null;
         const js = await r.text(); if (!/\bexport\s+default\b/.test(js)) return null;
         const b = URL.createObjectURL(new Blob([js], { type: 'text/javascript' })), m = await import(b);
@@ -280,7 +332,7 @@
     }
   }
 
-  /* MenuManager — SPA 版 */
+  /* MenuManager - SPA 版 */
   const currentDoc = () => (window.ReaderState?.doc || (typeof state !== 'undefined' ? state.doc : null) || '');
 
   class MenuManager {
@@ -307,7 +359,7 @@
       this.currentVol = docPath ? this.detectVolume(docPath) : null;
       if (!docPath) {
         this.mode = 'libmap'
-        this.renderLibmap()
+        this.navTree.innerHTML = this.buildLibmap()
       }
       else if (this.currentVol) {
         this.mode = 'epub'
@@ -319,7 +371,7 @@
       }
       else {
         this.mode = 'libmap'
-        this.renderLibmap()
+        this.navTree.innerHTML = this.buildLibmap()
       }
       this.afterRender(docPath);
     }
@@ -403,15 +455,14 @@
         return
       }
       const url = new URL(href, location.href);
-      if (PathUtils.samePath(url.pathname, location.pathname) && url.searchParams.has('doc')) {
+      if (normPath(url.pathname).toLowerCase() === normPath(location.pathname).toLowerCase() && url.searchParams.has('doc')) {
         const docPath = url.searchParams.get('doc') || '', hash = url.hash.slice(1);
-        if (sameDoc(docPath, currentDoc())) {
+        if (normDoc(docPath).toLowerCase() === normDoc(currentDoc()).toLowerCase()) {
           e.preventDefault()
           hash ? this.scrollToHash(hash, true) : window.scrollTo({ top: 0, left: 0, behavior: 'smooth' })
         }
         else if (hash) {
-          sessionStorage.setItem('__reader_pending_anchor', hash)
-          sessionStorage.setItem('__reader_pending_doc', docPath)
+          e.preventDefault()
         }
       }
     }
@@ -472,10 +523,8 @@
     /* SPA 文档路径辅助 */
     volumeDocPath(dp = currentDoc()) {
       const p = normPath(dp)
-      return (this.currentVol && sameDoc(p, this.currentVol.dir)) ? this.currentVol.dir + '/index.html' : p
+      return (this.currentVol && normDoc(p).toLowerCase() === normDoc(this.currentVol.dir).toLowerCase()) ? this.currentVol.dir + '/index.html' : p
     }
-    volumeDocFile(dp = currentDoc()) { return normDoc(this.volumeDocPath(dp)).split('/').pop() || 'index'; }
-
     /* SPA 文档信息 (unified with nav.js _volInfo, adapted for SPA) */
     _volInfo() {
       const c = normPath(currentDoc()), v = this.currentVol;
@@ -498,14 +547,14 @@
     async renderEpub(docPath) {
       const dir = this.currentVol?.dir || '', data = await this.fetchVolData(dir);
       if (!data) {
-        const np = normPath(docPath), fallback = sameDoc(np, dir) || sameDoc(np, dir + '/index.html') || sameDoc(np, dir + '/nav.html');
+        const np = normPath(docPath), fallback = normDoc(np).toLowerCase() === normDoc(dir).toLowerCase() || normDoc(np).toLowerCase() === normDoc(dir + '/index.html').toLowerCase() || normDoc(np).toLowerCase() === normDoc(dir + '/nav.html').toLowerCase();
         this.mode = fallback ? 'libmap' : (innerWidth < 997 ? 'page-toc' : 'libmap');
-        this.mode === 'page-toc' ? this.renderPageToc(docPath) : this.renderLibmap();
+        this.mode === 'page-toc' ? this.renderPageToc(docPath) : (this.navTree.innerHTML = this.buildLibmap());
         this.afterRender(docPath); return;
       }
       this.currentVol.data = data;
       const { col, item } = this.currentVol, tree = buildTree(data.headings || []), parts = this._breadcrumbParts(col, item, data);
-      this.navTree.innerHTML = this.renderBreadcrumb(parts) + (tree.length ? this.renderTree(tree, 'epub-toc', docPath) : '') + this._divider() + this.buildLibmap();
+      this.navTree.innerHTML = this.renderBreadcrumb(parts) + (tree.length ? this.renderTree(tree, 'epub-toc', docPath) : '') + '<div class="section-divider"><span>All works</span></div>' + this.buildLibmap();
       this.afterRender(docPath);
     }
 
@@ -513,19 +562,16 @@
       const headings = getHeadings($('#content'));
       if (headings.length <= 1) {
         this.mode = 'libmap'
-        this.renderLibmap()
+        this.navTree.innerHTML = this.buildLibmap()
         this.afterRender(docPath)
         return
       }
       const col = this.currentVol?.col || findCollection(docPath), curFile = normPath(docPath).split('/').pop();
       const nodes = headings.map(h => ({ level: Number(h.tagName[1]) || 2, text: h.textContent.trim(), id: h.id, file: curFile }));
       const parts = [col?.path ? { text: col.label || 'Library', href: makeHref(col.path), expand: col.id } : { text: col?.label || 'Library', expand: col?.id }, { text: nodes[0]?.text || document.title }];
-      this.navTree.innerHTML = this.renderBreadcrumb(parts) + this.renderTree(buildTree(nodes), 'page-toc', docPath) + this._divider() + this.buildLibmap();
+      this.navTree.innerHTML = this.renderBreadcrumb(parts) + this.renderTree(buildTree(nodes), 'page-toc', docPath) + '<div class="section-divider"><span>All works</span></div>' + this.buildLibmap();
       this.afterRender(docPath);
     }
-
-    renderLibmap() { this.navTree.innerHTML = this.buildLibmap(); }
-
     /* 数据 */
     async fetchVolData(dir) {
       const raw = await fetchVolData(dir, this.volCache); if (!raw) return null;
@@ -548,22 +594,25 @@
     }
 
     _renderLink({ href, path, text, badge = '', dataFile = '', dataId = '', extra = '' }) {
-      const raw = String(href || path || '').trim(), ext = /^(?:http|https):/i.test(raw);
+      const raw = String(href || path || '').trim(), ext = /^(?:https?:)?\/\//i.test(raw) || PathUtils.isSpecial(raw);
       const clean = !href && !ext ? normPath(raw) : '', final = ext || href ? raw : makeHref(raw);
-      const attrs = [`href="${esc(final)}"`, !href && clean ? `data-path="${esc('/' + clean)}"` : '', dataFile ? `data-file="${esc(dataFile)}"` : '', dataId ? `data-id="${esc(dataId)}"` : '', extra, 'class="sidebar-link"'].filter(Boolean).join(' ');
+      const attrs = [`href="${esc(final)}"`, !href && clean ? `data-path="${esc('/' + clean)}"` : '', dataFile ? `data-file="${esc(dataFile)}"` : '', dataId ? `data-id="${esc(dataId)}"` : '', extra, 'class="sidebar-link"', ext ? `target="_blank"` : ''].filter(Boolean).join(' ');
       return `<a ${attrs}>${esc(text || '')}${badge}</a>`;
     }
 
     /* 渲染：树 */
     renderTree(nodes, cls, docPath) {
-      return `<ul class="sidebar-menu ${esc(cls)}">${this.renderNodes(nodes, normDoc(this.volumeDocPath(docPath || currentDoc())))}</ul>`;
+      const effectiveDoc = docPath || currentDoc();
+      return `<ul class="sidebar-menu ${esc(cls)}">${this.renderNodes(nodes, normDoc(this.volumeDocPath(effectiveDoc)), effectiveDoc)}</ul>`;
     }
 
-    renderNodes(nodes, currentFull) {
-      const volDir = this.currentVol?.dir || '', isPage = this.mode === 'page-toc', curHref = makeHref(this.volumeDocPath(currentDoc()));
+    renderNodes(nodes, currentFull, docPath) {
+      const volDir = this.currentVol?.dir || '', isPage = this.mode === 'page-toc';
+      const curDoc = docPath || currentDoc();
+      const curHref = makeHref(this.volumeDocPath(curDoc));
       return nodes.map(n => {
         const raw = n.file || '', full = raw && !isPage ? normPath((volDir + '/' + raw).replace(/\/+/g, '/')) : raw;
-        const same = isPage || (full && sameDoc(full, currentFull));
+        const same = isPage || (full && normDoc(full).toLowerCase() === normDoc(currentFull).toLowerCase());
         const href = isPage ? (n.id ? `#${esc(n.id)}` : curHref) : same ? (n.id ? `#${esc(n.id)}` : makeHref(full || currentFull)) : makeHref(full, n.id || '');
         const children = n.children?.length ? `<ul class="sidebar-menu sidebar-menu--nested">${this.renderNodes(n.children, currentFull)}</ul>` : '';
         const caret = children ? '<button class="sidebar-caret" type="button" aria-label="Expand section" tabindex="0">\u25b8</button>' : '';
@@ -585,7 +634,8 @@
       if (groups.length) {
         const direct = groups.every(g => g.path && !(g.items || []).length);
         const nested = direct ? `<ul class="sidebar-menu sidebar-menu--nested">${groups.map(g => this.renderGroup(g)).join('')}</ul>` : '';
-        return `<li class="sidebar-item sidebar-item--category sidebar-item--collapsible" data-section="${esc(col.id)}" data-collapsed="true"${direct ? ' data-loaded="true"' : ''}><div class="sidebar-item-row"><span class="sidebar-category-label">${label}${badge}</span><button class="sidebar-caret" type="button" aria-label="Expand section" tabindex="0">\u25b8</button></div>${nested}</li>`;
+        const head = `<span class="sidebar-category-label">${label}${badge}</span>`;
+        return `<li class="sidebar-item sidebar-item--category sidebar-item--collapsible" data-section="${esc(col.id)}" data-collapsed="true"${direct ? ' data-loaded="true"' : ''}><div class="sidebar-item-row">${head}<button class="sidebar-caret" type="button" aria-label="Expand section" tabindex="0">\u25b8</button></div>${nested}</li>`;
       }
       return `<li class="sidebar-item"><span class="sidebar-category-label">${label}${badge}</span></li>`;
     }
@@ -593,16 +643,15 @@
     renderGroup(group) {
       const label = esc(group.label || ''), items = group.items || [], raw = String(group.path || '').trim(), gp = normPath(group.path);
       if (!items.length) return raw ? `<li class="sidebar-item">${this._renderLink({ path: group.path, text: group.label || '' })}</li>` : `<li class="sidebar-item"><span class="sidebar-category-label">${label}</span></li>`;
-      return `<li class="sidebar-item sidebar-item--category sidebar-item--collapsible" data-group-path="${esc(gp)}" data-collapsed="true"><div class="sidebar-item-row"><span class="sidebar-category-label">${label}</span><button class="sidebar-caret" type="button" aria-label="Expand section" tabindex="0">\u25b8</button></div><ul class="sidebar-menu sidebar-menu--nested">${items.map(item => `<li class="sidebar-item">${this._renderLink({ path: item.path || '', text: item.label || item.title || '' })}</li>`).join('')}</ul></li>`;
+      const head = raw ? this._renderLink({ path: group.path, text: group.label || '' }) : `<span class="sidebar-category-label">${label}</span>`;
+      return `<li class="sidebar-item sidebar-item--category sidebar-item--collapsible" data-group-path="${esc(gp)}" data-collapsed="true"><div class="sidebar-item-row">${head}<button class="sidebar-caret" type="button" aria-label="Expand section" tabindex="0">\u25b8</button></div><ul class="sidebar-menu sidebar-menu--nested">${items.map(item => `<li class="sidebar-item">${this._renderLink({ path: item.path || '', text: item.label || item.title || '' })}</li>`).join('')}</ul></li>`;
     }
-
-    _divider() { return '<div class="section-divider"><span>All works</span></div>'; }
 
     /* TOC */
     pageHeadings() {
       if (this.mode === 'epub') {
         const { file: curFile } = this._volInfo();
-        return (this.currentVol?.data?.headings || []).filter(h => sameDoc((h.file || '').replace(/\.x?html?$/i, ''), curFile)).map(h => ({
+        return (this.currentVol?.data?.headings || []).filter(h => normDoc((h.file || '').replace(/\.x?html?$/i, '')).toLowerCase() === normDoc(curFile).toLowerCase()).map(h => ({
           level: h.level || 2, text: h.text || '', id: h.id || null
         }));
       }
@@ -664,7 +713,6 @@
       return best;
     }
 
-    _matchFile(link, file) { return sameDoc((link.dataset.file || '').replace(/\.x?html?$/i, ''), file); }
     _elementTop(id) {
       if (!id) return 0;
       const el = document.getElementById(id);
@@ -675,7 +723,7 @@
       if (this.mode === 'libmap') return;
       const links = this.sidebarLinks();
       if (!links.length) return;
-      const { file } = this._volInfo(), fileLinks = links.filter(l => this._matchFile(l, file));
+      const { file } = this._volInfo(), fileLinks = links.filter(l => normDoc((l.dataset.file || '').replace(/\.x?html?$/i, '')).toLowerCase() === normDoc(file).toLowerCase());
       let best = id ? fileLinks.find(l => l.dataset.id === id) : null;
       if (!best) {
         const y = scrollY + 80;
@@ -722,17 +770,17 @@
       let best = null, score = 0;
       $$('.sidebar-link', tree).forEach(a => {
         const f = (a.dataset.file || '').replace(/\.x?html?$/i, ''), id = a.dataset.id || ''; let s = 0;
-        if (sameDoc(f, file)) {
+        if (normDoc(f).toLowerCase() === normDoc(file).toLowerCase()) {
           s = 1;
           if (id && hash && id === hash) s = 3;          // exact hash match
           else if (!id && !hash) s = 2;                  // file-level heading, no hash
-          else if (!id && hash) s = 0;                   // file-level heading but URL has hash → skip
+          else if (!id && hash) s = 0;                   // file-level heading but URL has hash -> skip
         }
         if (s > score) { score = s; best = a; }
       });
       // If no best yet (e.g. hash doesn't match any id), fall back to file-level heading
       if (!best && !hash) {
-        best = $$('.sidebar-link', tree).find(a => sameDoc((a.dataset.file || '').replace(/\.x?html?$/i, ''), file) && !a.dataset.id);
+        best = $$('.sidebar-link', tree).find(a => normDoc((a.dataset.file || '').replace(/\.x?html?$/i, '')).toLowerCase() === normDoc(file).toLowerCase() && !a.dataset.id);
       }
       if (best) {
         best.classList.add('sidebar-link--active')
@@ -753,7 +801,7 @@
       const hash = sessionStorage.getItem('__reader_pending_anchor'), dp = sessionStorage.getItem('__reader_pending_doc');
       if (!hash) return;
       sessionStorage.removeItem('__reader_pending_anchor'); sessionStorage.removeItem('__reader_pending_doc');
-      if (dp && !sameDoc(dp, currentDoc())) return;
+      if (dp && !(normDoc(dp).toLowerCase() === normDoc(currentDoc()).toLowerCase())) return;
       const tryScroll = () => {
         const el = document.getElementById(hash)
         if (!el) return false
@@ -762,17 +810,15 @@
       };
       if (!tryScroll()) requestAnimationFrame(() => { if (!tryScroll()) setTimeout(tryScroll, 150); });
     }
-
-    findCollectionByCurrentPath() { return findCollection(currentDoc()); }
   }
 
   /* 导出 */
   const Core = {
-    $, $$, esc, cssEsc, EventBag, PathUtils, HeadingTracker,
-    normalizePath: normPath, normalizeDoc: normDoc, sameDocValue: sameDoc,
+    $, $$, esc, cssEsc, EventBag, PathUtils, PathResolver, HeadingTracker,
+    normalizePath: normPath, normalizeDoc: normDoc, sameDocValue: PathUtils.sameDoc.bind(PathUtils),
     samePathValue: PathUtils.samePath.bind(PathUtils), startsWithPathValue: PathUtils.startsWithPath.bind(PathUtils),
     fetchWithLowerFallback, hasSelection: hasSel, resolveUrl: PathUtils.resolveUrl.bind(PathUtils),
-    resolveDocHref, readerHref: makeHref, resolveCssHref: PathUtils.resolveCssHref.bind(PathUtils),
+    resolveDocHref, readerHref: makeHref,
     findCollection, scrollToEl, syncFill, onScrollFrame,
     getDomHeadings: getHeadings, getActiveHeadingId: (headings, t = 200) => {
       for (let i = (headings || []).length - 1; i >= 0; i--) if (headings[i].getBoundingClientRect().top <= t) return headings[i].id
@@ -783,7 +829,7 @@
 
   Object.assign(window, {
     ReaderCore: Core, $, $$, on: (t, e, h, o) => t && t.addEventListener(e, h, o || false),
-    esc, syncFill: Core.syncFill, resolveUrl: Core.resolveUrl, resolveCssHref: Core.resolveCssHref,
+    esc, syncFill: Core.syncFill, resolveUrl: Core.resolveUrl,
     fetchWithLowerFallback, findCollection, scrollToEl, getDomHeadings: getHeadings,
     getActiveHeadingId: Core.getActiveHeadingId, hasActiveTextSelection: hasSel,
     buildHeadingTree: buildTree, expandTo, fetchVolData, onScrollFrame

@@ -1,5 +1,5 @@
 const C = window.ReaderCore;
-const { $, $$, esc, cssEsc, syncFill, findCollection, resolveCssHref, scrollToEl, onScrollFrame, readerHref } = C;
+const { $, $$, esc, cssEsc, syncFill, findCollection, scrollToEl, onScrollFrame, PathResolver } = C;
 const sameDoc = C.sameDocValue;
 const fetchWithLowerFallback = C.fetchWithLowerFallback;
 
@@ -15,7 +15,7 @@ const state = {
 };
 window.ReaderState = state;
 
-const resolveDocLink = (href, base = '') => C.resolveDocHref ? C.resolveDocHref(href, base) : null;
+const resolveDocLink = (href, base = '') => PathResolver ? PathResolver.resolve(base || state.doc || '', href) : null;
 
 const isFootnoteLink = a => {
     const href = a.getAttribute('href') || '';
@@ -135,7 +135,12 @@ class FootnotePopup {
         $$('[id]', clone).forEach(el => el.removeAttribute('id'));
         viewer.replaceChildren(clone);
         if (jump) {
-            jump.href = cross ? C.resolveUrl(href) : href;
+            if (cross) {
+                const resolved = resolveDocLink(href, state.doc ? state.doc.replace(/\/[^/]*$/, '/') : '');
+                jump.href = resolved?.type === 'doc' ? resolved.href : C.resolveUrl(href);
+            } else {
+                jump.href = href;
+            }
             jump.textContent = cross ? 'Go to note (other page)' : 'Jump to footnote';
             jump.classList.toggle('popover__jump--cross', cross);
             jump.style.display = '';
@@ -204,7 +209,7 @@ class ReaderApp {
         this.buildWelcomeCards();
         this.bindEvents();
         this.handleResize();
-        const initialDoc = this.normalizeDocPath(new URLSearchParams(location.search).get('doc') || '');
+        const initialDoc = (new URLSearchParams(location.search).get('doc') || '') + location.hash;
         initialDoc ? this.loadDoc(initialDoc) : this.showHome(false);
     }
 
@@ -355,31 +360,24 @@ class ReaderApp {
         }
     }
 
-    clearDynamicStyles() { $$('.dynamic-doc-css, .dynamic-doc-style, .dynamic-doc-base').forEach(el => el.remove()); }
-
-    async loadCollectionStyles(docPath) {
-        const col = findCollection(docPath);
-        for (const css of col?.stylesheets || []) {
-            const base = (col.basePath || col.basepath || `/${col.id}/`).replace(/^\/+/, '');
-            const link = Object.assign(document.createElement('link'), { rel: 'stylesheet', type: 'text/css', className: 'dynamic-doc-css', href: resolveCssHref(css, base) });
-            document.head.insertBefore(link, document.head.firstChild);
-            await new Promise(resolve => { link.onload = link.onerror = resolve; setTimeout(resolve, 800); });
-        }
+    clearDynamicStyles() { 
+        $$('.dynamic-doc-css, .dynamic-doc-style').forEach(el => el.remove()); 
     }
 
     async loadDoc(rawPath) {
-        const docPath = this.normalizeDocPath(rawPath);
+        let docPath = PathResolver.path('', rawPath);
         this.showLoading(docPath);
         this.clearDynamicStyles();
-        await this.loadCollectionStyles(docPath);
         this.updateBreadcrumb(docPath, null);
         try {
             const loaded = await fetchWithLowerFallback(docPath);
             const res = loaded.res;
             if (!res.ok) throw new Error(String(res.status));
             const html = await res.text();
-            const actualPath = this.normalizeDocPath(loaded.path || docPath);
-            this.renderDoc(html, actualPath);
+            const hash = rawPath.includes('#') ? rawPath.split('#')[1] : '';
+            const actualUrl = loaded.url || loaded.path || docPath;
+            history.replaceState(history.state || {}, '', PathResolver.makeSpa(docPath,hash));
+            this.renderDoc(html, hash ? docPath+'#'+hash : docPath, actualUrl);
             this.revealLoadedContent();
         } catch (error) {
             this.showError(docPath, error.message);
@@ -422,19 +420,18 @@ class ReaderApp {
         });
     }
 
-    renderDoc(html, docPath) {
+    renderDoc(html, docPath, finalUrl) {
         const parsed = new DOMParser().parseFromString(html, 'text/html');
-        const base = docPath.substring(0, docPath.lastIndexOf('/') + 1);
-        this.injectDocBase(base);
-        this.injectDocStyles(parsed, base);
-        this.rewriteDocUrls(parsed, base);
+        this.rewriteDocUrls(parsed, docPath);
+        this.rewriteDocAssets(parsed, finalUrl);
+        this.injectDocStyles(parsed, finalUrl);
         const content = $('#content');
         injectContentLang(parsed, content);
         content.innerHTML = (parsed.body.querySelector('div.prose#content') || parsed.body).innerHTML;
         this.prepareAnchors(content);
         state.doc = docPath;
         const title = parsed.querySelector('title')?.textContent?.trim();
-        document.title = title ? title + ' - ' + this.siteTitle : this.siteTitle; 
+        document.title = title ? title + ' - ' + this.siteTitle : this.siteTitle;
         this.updateBreadcrumb(docPath, title);
         this.fixOverflow(content);
         this.updatePrevNext(docPath);
@@ -443,22 +440,14 @@ class ReaderApp {
         $('#toc-desktop').style.display = '';
     }
 
-    injectDocBase(base) {
-        $$('.dynamic-doc-base').forEach(el => el.remove());
-        const el = document.createElement('base');
-        el.className = 'dynamic-doc-base';
-        el.href = base || location.href;
-        el.target = '_blank';
-        document.head.insertBefore(el, document.head.firstChild);
-    }
-
-    injectDocStyles(parsed, base) {
+    injectDocStyles(parsed, finalUrl) {
         $$('.dynamic-doc-style').forEach(el => el.remove());
         parsed.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
             const href = link.getAttribute('href');
             if (!href || /\/?reader\.css(?:[?#].*)?$/i.test(href)) return;
             const el = link.cloneNode(false);
             el.classList.add('dynamic-doc-style');
+            el.href = PathResolver.resolveResource(finalUrl, href);
             document.head.appendChild(el);
         });
         parsed.querySelectorAll('style').forEach(style => {
@@ -468,10 +457,24 @@ class ReaderApp {
         });
     }
 
-    rewriteDocUrls(parsed, base) {
+    rewriteDocUrls(parsed, finalUrl) {
         parsed.querySelectorAll('a[href]').forEach(a => {
-            const resolved = resolveDocLink(a.getAttribute('href'), base);
+            const href = a.getAttribute('href') || '';
+            const resolved = PathResolver.resolve(finalUrl || state.doc || '', href);
             if (resolved?.type === 'doc') a.setAttribute('href', resolved.href);
+        });
+    }
+
+    rewriteDocAssets(parsed, finalUrl) {
+        parsed.querySelectorAll('img[src],script[src],iframe[src],video[src],audio[src],source[src],track[src]').forEach(el => {
+            el.setAttribute('src', PathResolver.resolveResource(finalUrl || state.doc || '', el.getAttribute('src')));
+        });
+        parsed.querySelectorAll('[srcset]').forEach(el => {
+            const srcset = (el.getAttribute('srcset') || '').split(',').map(part => {
+                const bits = part.trim().split(/\s+/), url = bits.shift();
+                return [PathResolver.resolveResource(finalUrl || state.doc || '', url), ...bits].join(' ');
+            }).join(', ');
+            el.setAttribute('srcset', srcset);
         });
     }
 
@@ -522,18 +525,20 @@ class ReaderApp {
         const bar = $('#doc-pathbar');
         if (!bar) return;
         const parts = [];
-        const displayPath = path.replace(/^\/+/, '');
+        const displayPath = path.replace(/^\/+/, '').replace(/[?#].*$/, '');
         const pieces = displayPath.split('/').filter(Boolean);
         for (let i = 0; i < pieces.length - 1; i++) {
             const sub = (path.startsWith('/') ? '/' : '') + pieces.slice(0, i + 1).join('/');
+            // 目录层级面包屑：中间层级链接到对应目录
+            const final = (i < pieces.length - 1) ? sub + '/' : sub;
             if (parts.length) parts.push('<span class="crumb-sep">/</span>');
-            parts.push(`<a class="crumb" href="${esc(readerHref(sub))}">${esc(pieces[i])}</a>`);
+            parts.push(`<a class="crumb" href="${esc(PathResolver.makeSpa(final))}">${esc(pieces[i])}</a>`);
         }
         if (pieces.length) {
             if (parts.length) parts.push('<span class="crumb-sep">/</span>');
-            parts.push(`<span class="crumb crumb--active">${esc(pieces.at(-1))}</span>`);
+            parts.push(`<span class="crumb current">${esc(pieces.at(-1))}</span>`);
         }
-        if (title) parts.push(`<span class="crumb-sep">/</span><span class="crumb crumb--active">${esc(title)}</span>`);
+        if (title) parts.push(`<span class="crumb-sep">/</span><span class="crumb current">${esc(title)}</span>`);
         bar.innerHTML = parts.join('') || '<span style="color:var(--text-3);">Library</span>';
     }
 
@@ -556,7 +561,7 @@ class ReaderApp {
 
     async findManifest(path, dir) {
         const col = findCollection(path);
-        const candidates = [...new Set([dir, (col?.path || col?.basePath || '').replace(/^\/+|\/+$/g, ''), location.pathname.split('/').slice(1, -1).join('/')].filter(Boolean))];
+        const candidates = [...new Set([dir, (col?.path || '').replace(/^\/+|\/+$/g, ''), location.pathname.split('/').slice(1, -1).join('/')].filter(Boolean))];
         for (const c of candidates) {
             try {
                 const raw = await C.fetchVolData(c, this.manifestCache);
@@ -619,7 +624,7 @@ class ReaderApp {
         btn.onclick = e => {
             e.preventDefault();
             const normalized = this.normalizeDocPath(path);
-            history.pushState({}, '', readerHref(normalized));
+            history.pushState({}, '', PathResolver.makeSpa(normalized));
             this.loadDoc(normalized);
         };
     }
@@ -655,7 +660,7 @@ class ReaderApp {
     }
 
     handlePopState() {
-        const docPath = this.normalizeDocPath(new URLSearchParams(location.search).get('doc') || '');
+        const docPath = (new URLSearchParams(location.search).get('doc') || '') + location.hash;
         if (!docPath) this.showHome(false);
         else if (!sameDoc(docPath, state.doc)) this.loadDoc(docPath);
         else if (location.hash) {
@@ -700,7 +705,7 @@ class ReaderApp {
             this.scrollToAnchor(href.slice(1), false);
             return;
         }
-        const resolved = resolveDocLink(href, state.doc ? state.doc.replace(/\/[^/]*$/, '/') : '');
+        const resolved = resolveDocLink(href, state.doc || '');
         if (resolved?.type === 'doc') {
             event.preventDefault();
             if (sameDoc(resolved.docPath, state.doc)) {
@@ -709,7 +714,8 @@ class ReaderApp {
                 return;
             }
             history.pushState({}, '', resolved.href);
-            this.loadDoc(resolved.docPath);
+            const final_href = resolved.hash ? resolved.docPath+'#' + resolved.hash : resolved.docPath
+            this.loadDoc(final_href);
         }
     }
 
